@@ -1,0 +1,9 @@
+(test
+ (name unit_tests)
+ (modules unit_tests)
+ (libraries reconcile unix))
+
+(test
+ (name recovery_unit)
+ (modules recovery_unit)
+ (libraries reconcile unix))

@@ -1,0 +1,15 @@
+(library
+ (name reconcile)
+ (wrapped false)
+ (modules model config win path db journal pool walk scan collision planner transfer space engine recovery)
+ (libraries unix yojson)
+ (foreign_stubs (language c) (names native_stubs sqlite_stubs) (flags :standard -O3 -Wall -Wextra))
+ (c_library_flags -lbcrypt))
+
+(executable
+ (name main)
+ (modules main)
+ (libraries reconcile))
+
+(env
+ (release (ocamlopt_flags :standard -O3)))
