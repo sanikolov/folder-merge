@@ -26,6 +26,10 @@ static wchar_t *wide(value p) {
 static HANDLE open_path(const wchar_t *p,DWORD access) {
   return CreateFileW(p,access,SHARING,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,NULL);
 }
+static DWORD without_readonly(DWORD attributes) {
+  DWORD result=attributes&~FILE_ATTRIBUTE_READONLY;
+  return result?result:FILE_ATTRIBUTE_NORMAL;
+}
 CAMLprim value fm_absolute(value path) {
   CAMLparam1(path); CAMLlocal1(result);
   wchar_t *p=wide(path); DWORD n=GetFullPathNameW(p,0,NULL,NULL);
@@ -121,11 +125,13 @@ CAMLprim value fm_probe(value path,value mode) {
   CAMLparam2(path,mode); wchar_t *p=wide(path); int m=Int_val(mode);
   DWORD a=GetFileAttributesW(p), e=GetLastError();
   if(a==INVALID_FILE_ATTRIBUTES) { caml_stat_free(p); win_error("Preflight attributes",e); }
-  if(m==1 && (a&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))) {
-    caml_stat_free(p); caml_failwith("Preflight: source is readonly, a link, or not a regular file");
+  if(m==1 && (a&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))) {
+    caml_stat_free(p); caml_failwith("Preflight: source is a link or not a regular file");
   }
   DWORD access=m==0?GENERIC_READ:m==1?(GENERIC_READ|DELETE):m==2?
-    (FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY|FILE_LIST_DIRECTORY):(DELETE|FILE_LIST_DIRECTORY);
+    (FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY|FILE_LIST_DIRECTORY):m==4?
+    FILE_WRITE_ATTRIBUTES:(DELETE|FILE_LIST_DIRECTORY);
+  if(m==1 && (a&FILE_ATTRIBUTE_READONLY)) access|=FILE_WRITE_ATTRIBUTES;
   HANDLE h=open_path(p,access); e=GetLastError(); caml_stat_free(p);
   if(h==INVALID_HANDLE_VALUE) win_error("Preflight access/sharing",e);
   if(m<2 && GetFileType(h)!=FILE_TYPE_DISK) { CloseHandle(h); caml_failwith("Not a regular disk file"); }
@@ -212,17 +218,50 @@ CAMLprim value fm_copy(value source,value dest) {
   /* CopyFile preserves alternate streams, attributes and security where supported. */
   if(!CopyFileW(s,d,TRUE)) error=GetLastError();
   if(!error) {
-    HANDLE h=CreateFileW(d,GENERIC_WRITE,SHARING,NULL,OPEN_EXISTING,0,NULL);
-    if(h==INVALID_HANDLE_VALUE) error=GetLastError();
-    else { if(!FlushFileBuffers(h)) error=GetLastError(); CloseHandle(h); }
+    DWORD a=GetFileAttributesW(d);
+    if(a==INVALID_FILE_ATTRIBUTES) error=GetLastError();
+    else {
+      BOOL readonly=(a&FILE_ATTRIBUTE_READONLY)!=0;
+      if(readonly && !SetFileAttributesW(d,without_readonly(a))) error=GetLastError();
+      if(!error) {
+        HANDLE h=CreateFileW(d,GENERIC_WRITE,SHARING,NULL,OPEN_EXISTING,0,NULL);
+        if(h==INVALID_HANDLE_VALUE) error=GetLastError();
+        else { if(!FlushFileBuffers(h)) error=GetLastError(); CloseHandle(h); }
+      }
+      /* Restore even on flush failure. The caller owns cleanup of this copy. */
+      if(readonly && !SetFileAttributesW(d,a)) error=GetLastError();
+    }
   }
   caml_leave_blocking_section(); caml_stat_free(s); caml_stat_free(d);
   if(error) win_error("Copy/flush",error);
   CAMLreturn(Val_unit);
 }
 CAMLprim value fm_unlink(value path) {
-  CAMLparam1(path); wchar_t *p=wide(path); BOOL ok=DeleteFileW(p); DWORD e=GetLastError(); caml_stat_free(p);
+  CAMLparam1(path); wchar_t *p=wide(path); DWORD a=GetFileAttributesW(p);
+  if(a==INVALID_FILE_ATTRIBUTES) { DWORD e=GetLastError(); caml_stat_free(p); win_error("Remove attributes",e); }
+  BOOL readonly=(a&FILE_ATTRIBUTE_READONLY)!=0;
+  if(readonly && !SetFileAttributesW(p,without_readonly(a))) {
+    DWORD e=GetLastError(); caml_stat_free(p); win_error("Clear readonly for removal",e);
+  }
+  BOOL ok=DeleteFileW(p); DWORD e=GetLastError();
+  if(!ok && readonly && !SetFileAttributesW(p,a)) {
+    DWORD restore_error=GetLastError(); caml_stat_free(p); win_error("Restore readonly after failed removal",restore_error);
+  }
+  caml_stat_free(p);
   if(!ok) win_error("Remove source",e);
+  CAMLreturn(Val_unit);
+}
+CAMLprim value fm_readonly(value path) {
+  CAMLparam1(path); wchar_t *p=wide(path); DWORD a=GetFileAttributesW(p),e=GetLastError(); caml_stat_free(p);
+  if(a==INVALID_FILE_ATTRIBUTES) win_error("Read readonly attribute",e);
+  CAMLreturn(Val_bool((a&FILE_ATTRIBUTE_READONLY)!=0));
+}
+CAMLprim value fm_set_readonly(value path,value enabled) {
+  CAMLparam2(path,enabled); wchar_t *p=wide(path); DWORD a=GetFileAttributesW(p),e=GetLastError();
+  if(a==INVALID_FILE_ATTRIBUTES) { caml_stat_free(p); win_error("Read attributes",e); }
+  DWORD updated=Bool_val(enabled)?(a|FILE_ATTRIBUTE_READONLY):(a&~FILE_ATTRIBUTE_READONLY);
+  BOOL ok=SetFileAttributesW(p,updated?updated:FILE_ATTRIBUTE_NORMAL); e=GetLastError(); caml_stat_free(p);
+  if(!ok) win_error("Restore readonly attribute",e);
   CAMLreturn(Val_unit);
 }
 CAMLprim value fm_free_space(value path) {

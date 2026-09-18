@@ -16,7 +16,7 @@ function Snapshot([string]$root) {
     if (-not [IO.Directory]::Exists($root)) { return 'ABSENT' }
     return (@(Get-ChildItem -LiteralPath $root -Force -Recurse | ForEach-Object {
         $relative=$_.FullName.Substring($root.Length)
-        if ($_.PSIsContainer) { "D|$relative" } else { "F|$relative|$((Get-FileHash -LiteralPath $_.FullName).Hash)" }
+        if ($_.PSIsContainer) { "D|$relative" } else { "F|$relative|$((Get-FileHash -LiteralPath $_.FullName).Hash)|$($_.Attributes -band [IO.FileAttributes]::ReadOnly)" }
     } | Sort-Object) -join "`n")
 }
 function Forward($c,[string]$operation='merge',[bool]$success=$true) {
@@ -43,6 +43,9 @@ foreach ($operation in 'merge','trim','plan') {
     Put "$($c.Q)\a\duplicate" 'existing Q'
     Put "$($c.T)\a\duplicate" 'duplicate'; Put "$($c.T)\report.txt" 'incoming'
     Put "$($c.T)\deep\nested\unique" 'unique'; Put "$($c.T)\other\unique" 'unique'
+    foreach ($relative in 'a\duplicate','report.txt','deep\nested\unique') {
+        [IO.File]::SetAttributes("$($c.T)\$relative",[IO.FileAttributes]::ReadOnly)
+    }
     [IO.Directory]::CreateDirectory("$($c.T)\empty") | Out-Null
     $k=Snapshot $c.K; $t=Snapshot $c.T; $q=Snapshot $c.Q
     Forward $c $operation
@@ -91,6 +94,18 @@ Recover $c
 Check ([IO.File]::ReadAllText("$($c.T)\file") -eq 'first') 'rename inferred after lost completion checkpoint'
 Recover $c
 
+$c=Case 'readonly-interrupted-delete'
+Put "$($c.T)\file" 'readonly original'
+[IO.File]::SetAttributes("$($c.T)\file",[IO.FileAttributes]::ReadOnly)
+Forward $c
+# Simulate the original remaining after its flag was cleared, before deletion.
+[IO.File]::Move("$($c.K)\file","$($c.T)\file")
+[IO.File]::SetAttributes("$($c.T)\file",[IO.FileAttributes]::Normal)
+Truncate-After $c 'BEGIN_MOVE'
+Recover $c
+Check (([IO.File]::GetAttributes("$($c.T)\file") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'recovery repairs interrupted readonly change'
+Recover $c
+
 $c=Case 'foreign-created-dir'; Put "$($c.T)\dir\file" 'first'; Forward $c
 Put "$($c.K)\dir\foreign" 'foreign'; $k=Snapshot $c.K
 Recover $c $false
@@ -108,8 +123,13 @@ if ([IO.Path]::GetPathRoot($env:TEMP) -ne [IO.Path]::GetPathRoot($TestRoot)) {
     [IO.Directory]::CreateDirectory($c.K) | Out-Null; [IO.Directory]::CreateDirectory($c.Q) | Out-Null
     try {
         Put "$($c.K)\copy" 'duplicate'; Put "$($c.T)\dir\dupe" 'duplicate'; Put "$($c.T)\unique" ('bytes '*10000)
+        [IO.File]::SetAttributes("$($c.T)\dir\dupe",[IO.FileAttributes]::ReadOnly)
+        [IO.File]::SetAttributes("$($c.T)\unique",[IO.FileAttributes]::ReadOnly)
         $k=Snapshot $c.K; $t=Snapshot $c.T; $q=Snapshot $c.Q
-        Forward $c; Recover $c
+        Forward $c
+        Check (([IO.File]::GetAttributes("$($c.Q)\dir\dupe") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'cross-volume Q preserves readonly'
+        Check (([IO.File]::GetAttributes("$($c.K)\unique") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'cross-volume K preserves readonly'
+        Recover $c
         Check ((Snapshot $c.K) -eq $k -and (Snapshot $c.T) -eq $t -and (Snapshot $c.Q) -eq $q) 'real cross-volume undo restores all trees'
         Recover $c
         Truncate-After $c 'UNDO_COPIED'; Recover $c

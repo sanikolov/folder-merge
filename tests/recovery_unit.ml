@@ -8,7 +8,7 @@ let write path data =
   let channel = open_out_bin path in
   Fun.protect ~finally:(fun () -> close_out channel) (fun () -> output_string channel data)
 
-let run window =
+let run readonly window =
   let root = Filename.temp_file "filemerge-undo-unit-" "" in
   Sys.remove root;
   Win.mkdir root;
@@ -39,6 +39,7 @@ let run window =
       List.iter (fun path -> ignore (Win.remove_dir path)) [ k; t; q; root ])
     (fun () ->
       write src "payload";
+      Win.set_readonly src readonly;
       let original_id = Win.identity src in
       let plan =
         {
@@ -71,7 +72,8 @@ let run window =
           let plan = if window = Bad_path then { plan with source = "..\\outside" } else plan in
           Journal.emit journal "BEGIN_MOVE"
             (Planner.fields plan
-            @ [ ("source_identity", Journal.s original_id); ("temporary", Journal.s temp) ]);
+            @ [ ("source_identity", Journal.s original_id); ("temporary", Journal.s temp) ]
+            @ if readonly then [ ("source_readonly", `Bool true) ] else []);
           if window <> Bad_path then begin
             Win.copy src temp;
             if window <> Unknown_temp then
@@ -90,6 +92,7 @@ let run window =
               end
             end
           end);
+      if readonly && (window = Published || window = Undo_published) then Win.set_readonly src false;
       if window = Unknown_temp || window = Bad_path then begin
         check "unsafe log/window refused"
           (try
@@ -101,6 +104,7 @@ let run window =
       end
       else begin
         Recovery.run c.log;
+        check "original readonly restored" (Win.readonly src = readonly);
         check "original content restored"
           (Win.hash src
           =
@@ -113,6 +117,9 @@ let run window =
       end)
 
 let () =
-  List.iter run [ Copied; Published; Undo_published; Unknown_temp; Bad_path ];
+  List.iter
+    (fun readonly ->
+      List.iter (run readonly) [ Copied; Published; Undo_published; Unknown_temp; Bad_path ])
+    [ false; true ];
   Win.release_hash_context ();
-  print_endline "Passed 5 native recovery interruption/safety scenarios"
+  print_endline "Passed 10 native recovery interruption/safety scenarios"

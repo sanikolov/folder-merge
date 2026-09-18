@@ -155,7 +155,11 @@ an explicit I/O record so failures can be tested independently of Windows.
 2. Stream directory entries into a disk-backed SQLite manifest. Directory
    identities and the pending traversal queue also live on disk.
 3. Check read access, sharing restrictions, and byte-range locks. For mutation
-   runs, check delete access and reject readonly incoming files too.
+   runs, check delete access and, for read-only incoming files, attribute-write access.
+   Read-only files are supported: copies retain the flag, source deletion clears it
+   temporarily and restores it on failure. The original flag is recorded before each
+   move so recovery can restore it even after an interrupted attribute change.
+   Older journals without that field preserve the surviving file's current flag.
 4. Hash only sizes occurring in both K and T. SHA-256 uses Windows CNG and a
    reusable 1 MiB native buffer per worker. The index stores 32-byte digests.
 5. Classify against the complete original K index, then persist destinations in

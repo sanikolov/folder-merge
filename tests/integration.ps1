@@ -147,10 +147,15 @@ Assert (@(Get-ChildItem -LiteralPath $c.Q -Recurse).Count -eq 0) 'busy preflight
 $c=New-Case 'readonly'; Write-File "$($c.T)\a" 'okay'; Write-File "$($c.T)\z" 'protected'
 [IO.File]::SetAttributes("$($c.T)\z",[IO.FileAttributes]::ReadOnly)
 try {
-    $null=Invoke-Reconcile $c 'merge' 'keep' 'skip' $false
-    $null=Invoke-Reconcile $c 'plan' 'keep' 'skip' $false
-} finally { [IO.File]::SetAttributes("$($c.T)\z",[IO.FileAttributes]::Normal) }
-Assert ([IO.File]::Exists("$($c.T)\a")) 'protected file abort before first move'
+    $null=Invoke-Reconcile $c 'plan' 'keep' 'skip' $true
+    Assert (([IO.File]::GetAttributes("$($c.T)\z") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'plan preserves readonly'
+    $null=Invoke-Reconcile $c 'merge' 'keep' 'skip' $true
+    Assert (([IO.File]::GetAttributes("$($c.K)\z") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'merge preserves readonly'
+} finally {
+    foreach ($path in @("$($c.T)\z","$($c.K)\z")) {
+        if ([IO.File]::Exists($path)) { [IO.File]::SetAttributes($path,[IO.FileAttributes]::Normal) }
+    }
+}
 
 $c=New-Case 'denied-file'; Write-File "$($c.T)\a" 'okay'; Write-File "$($c.T)\z" 'denied'
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -161,6 +166,21 @@ Set-Acl -LiteralPath "$($c.T)\z" -AclObject $deniedAcl
 try { $null=Invoke-Reconcile $c 'merge' 'keep' 'skip' $false }
 finally { Set-Acl -LiteralPath "$($c.T)\z" -AclObject $savedAcl }
 Assert ([IO.File]::Exists("$($c.T)\a")) 'ACL denial abort before first move'
+
+$c=New-Case 'readonly-attribute-denied'; Write-File "$($c.T)\a" 'okay'; Write-File "$($c.T)\z" 'readonly'
+[IO.File]::SetAttributes("$($c.T)\z",[IO.FileAttributes]::ReadOnly)
+$savedAcl=Get-Acl -LiteralPath "$($c.T)\z"
+$deniedAcl=Get-Acl -LiteralPath "$($c.T)\z"
+$deniedAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity,'WriteAttributes','Deny'))
+Set-Acl -LiteralPath "$($c.T)\z" -AclObject $deniedAcl
+try {
+    $null=Invoke-Reconcile $c 'merge' 'keep' 'skip' $false
+    Assert ([IO.File]::Exists("$($c.T)\a")) 'attribute denial aborts before first move'
+    Assert (([IO.File]::GetAttributes("$($c.T)\z") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'denied preflight does not clear readonly'
+} finally {
+    Set-Acl -LiteralPath "$($c.T)\z" -AclObject $savedAcl
+    [IO.File]::SetAttributes("$($c.T)\z",[IO.FileAttributes]::Normal)
+}
 
 $c=New-Case 'denied-directory'; Write-File "$($c.T)\blocked\z" 'denied'
 $savedAcl=Get-Acl -LiteralPath "$($c.T)\blocked"

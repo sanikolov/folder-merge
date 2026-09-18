@@ -231,7 +231,24 @@ let test_native () =
       check "million a SHA256"
         (hex (Win.hash path) = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
       Win.probe path Win.Remove_file;
-      check "stream-inclusive budget" (Win.required_space path (Filename.dirname path) >= 1_000_000L))
+      check "stream-inclusive budget" (Win.required_space path (Filename.dirname path) >= 1_000_000L);
+      let copy = path ^ ".copy" in
+      Fun.protect
+        ~finally:(fun () ->
+          Win.set_readonly path false;
+          if Win.exists copy then Win.unlink copy)
+        (fun () ->
+          Win.set_readonly path true;
+          Win.probe path Win.Remove_file;
+          check "preflight leaves readonly intact" (Win.readonly path);
+          Win.copy path copy;
+          check "copy flush preserves readonly" (Win.readonly copy);
+          check "readonly copy content" (Win.hash path = Win.hash copy);
+          raises "readonly copy cannot overwrite" (fun () -> Win.copy path copy);
+          check "failed copy leaves destination readonly" (Win.readonly copy);
+          Win.unlink copy;
+          check "readonly temporary cleanup" (not (Win.exists copy));
+          check "copy leaves source readonly" (Win.readonly path)))
 
 let test_db () =
   let p = Filename.temp_file "folder-merge-db-test-" ".sqlite" in

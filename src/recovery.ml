@@ -99,7 +99,8 @@ let schema db =
     {|
     CREATE TABLE undo_moves(id INTEGER PRIMARY KEY,rel TEXT UNIQUE,dest TEXT,dest_key TEXT UNIQUE,size INTEGER,
       source_id TEXT,copy_id TEXT DEFAULT '',temp TEXT,undo_started INTEGER DEFAULT 0,
-      undo_copy_id TEXT DEFAULT '',undo_id TEXT DEFAULT '',undo_temp TEXT DEFAULT '',decision TEXT DEFAULT '');
+      undo_copy_id TEXT DEFAULT '',undo_id TEXT DEFAULT '',undo_temp TEXT DEFAULT '',decision TEXT DEFAULT '',
+      source_readonly TEXT DEFAULT '');
     CREATE TABLE undo_dirs(path TEXT PRIMARY KEY,path_key TEXT UNIQUE,identity TEXT DEFAULT '');
     CREATE TABLE undo_pruned(path TEXT PRIMARY KEY);
     CREATE INDEX undo_temp_paths ON undo_moves(temp);
@@ -192,9 +193,21 @@ let read db log =
               in
               if not (same temp expected) then fail "invalid temporary path";
               Db.run db
-                "INSERT INTO undo_moves(id,rel,dest,dest_key,size,source_id,temp) \
-                 VALUES(?,?,?,?,?,?,?)"
-                [| n; rel; dest; Win.key dest; size; string "source_identity" json; temp |]
+                "INSERT INTO undo_moves(id,rel,dest,dest_key,size,source_id,temp,source_readonly) \
+                 VALUES(?,?,?,?,?,?,?,?)"
+                [|
+                  n;
+                  rel;
+                  dest;
+                  Win.key dest;
+                  size;
+                  string "source_identity" json;
+                  temp;
+                  (match member "source_readonly" json with
+                  | None -> "" (* Older journals did not record this attribute. *)
+                  | Some (`Bool b) -> if b then "1" else "0"
+                  | _ -> fail "invalid source_readonly field");
+                |]
           | "COPIED" | "RENAMED" | "DESTINATION_PUBLISHED" | "SOURCE_REMOVED" | "DONE" ->
               let n = id json in
               let rel, dest, size = validate_move () in
@@ -260,7 +273,7 @@ let read db log =
 let iter_moves db f =
   Db.iter db
     {|SELECT id,rel,dest,size,source_id,copy_id,temp,
-  undo_started,undo_copy_id,undo_id,undo_temp,decision FROM undo_moves ORDER BY id DESC|}
+  undo_started,undo_copy_id,undo_id,undo_temp,decision,source_readonly FROM undo_moves ORDER BY id DESC|}
     [||] f
 
 let root_for h path =
@@ -330,6 +343,8 @@ let preflight db h log =
             end
           in
           let reference = if original <> None then src else dest in
+          if r.(12) <> "" && Win.readonly reference <> (r.(12) = "1") then
+            Win.probe reference Win.Write_attributes;
           validate_temp r.(6) r.(5) reference;
           validate_temp r.(10) r.(8) reference;
           let undo_temporary =
@@ -441,6 +456,9 @@ let execute db h journal =
         Journal.emit journal "UNDO_REMOVE_COPY" (fields r);
         Win.unlink dest
       end;
+      (* Also repairs a crash between clearing the original flag and deletion.
+         BEGIN_MOVE was durable before either could happen; older logs leave it alone. *)
+      if r.(12) <> "" && Win.readonly src <> (r.(12) = "1") then Win.set_readonly src (r.(12) = "1");
       Journal.emit journal "UNDO_DONE" (("identity", Journal.s (Win.identity src)) :: fields r));
   Db.iter db "SELECT path FROM undo_dirs ORDER BY length(path) DESC,path DESC" [||] (fun r ->
       if Win.exists r.(0) then begin

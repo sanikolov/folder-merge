@@ -37,7 +37,7 @@ let release_hash_context () =
   Option.iter close_hash_context !cell;
   cell := None
 
-type access = Read_file | Remove_file | Add_children | Remove_directory
+type access = Read_file | Remove_file | Add_children | Remove_directory | Write_attributes
 
 external native_probe : string -> int -> unit = "fm_probe"
 
@@ -47,8 +47,11 @@ let probe path access =
     | Read_file -> 0
     | Remove_file -> 1
     | Add_children -> 2
-    | Remove_directory -> 3)
+    | Remove_directory -> 3
+    | Write_attributes -> 4)
 
+external readonly : string -> bool = "fm_readonly"
+external set_readonly : string -> bool -> unit = "fm_set_readonly"
 external mkdir : string -> unit = "fm_mkdir"
 external remove_dir : string -> bool = "fm_remove_dir"
 external rename : string -> string -> bool = "fm_rename"

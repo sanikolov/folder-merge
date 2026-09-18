@@ -50,7 +50,9 @@ let execute db journal c run_id =
       Journal.emit journal "BEGIN_MOVE"
         (Planner.fields p
         @ [
-            ("source_identity", Journal.s (Win.identity source)); ("temporary", Journal.s temporary);
+            ("source_identity", Journal.s (Win.identity source));
+            ("temporary", Journal.s temporary);
+            ("source_readonly", `Bool (Win.readonly source));
           ]);
       let io =
         Transfer.
