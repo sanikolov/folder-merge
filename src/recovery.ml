@@ -102,7 +102,7 @@ let schema db =
       undo_copy_id TEXT DEFAULT '',undo_id TEXT DEFAULT '',undo_temp TEXT DEFAULT '',decision TEXT DEFAULT '',
       source_readonly TEXT DEFAULT '');
     CREATE TABLE undo_dirs(path TEXT PRIMARY KEY,path_key TEXT UNIQUE,identity TEXT DEFAULT '');
-    CREATE TABLE undo_pruned(path TEXT PRIMARY KEY);
+    CREATE TABLE undo_pruned(path TEXT PRIMARY KEY,readonly TEXT DEFAULT '');
     CREATE INDEX undo_temp_paths ON undo_moves(temp);
   |}
 
@@ -234,10 +234,19 @@ let read db log =
               if event = "CREATE_DIRECTORY" then
                 Db.run db "UPDATE undo_dirs SET identity=? WHERE path=?"
                   [| string "identity" json; p |]
-          | "PRUNE_INTENT" | "PRUNE" ->
+          | "PRUNE_INTENT" | "PRUNE" | "PRUNE_SKIPPED" ->
               let p = string "path" json in
               inside h.config.trim p;
-              Db.run db "INSERT OR IGNORE INTO undo_pruned(path) VALUES(?)" [| p |]
+              let readonly =
+                if event <> "PRUNE_INTENT" then ""
+                else
+                  match member "readonly" json with
+                  | None -> "" (* Older journals did not record directory attributes. *)
+                  | Some (`Bool b) -> if b then "1" else "0"
+                  | _ -> fail "invalid prune readonly field"
+              in
+              Db.run db "INSERT OR IGNORE INTO undo_pruned(path,readonly) VALUES(?,?)"
+                [| p; readonly |]
           | "UNDO_BEGIN" | "UNDO_COPIED" | "UNDO_PUBLISHED" | "UNDO_DONE" ->
               let n = id json in
               if Db.one db "SELECT id FROM undo_moves WHERE id=?" [| n |] = None then
@@ -460,6 +469,8 @@ let execute db h journal =
          BEGIN_MOVE was durable before either could happen; older logs leave it alone. *)
       if r.(12) <> "" && Win.readonly src <> (r.(12) = "1") then Win.set_readonly src (r.(12) = "1");
       Journal.emit journal "UNDO_DONE" (("identity", Journal.s (Win.identity src)) :: fields r));
+  Db.iter db "SELECT path FROM undo_pruned WHERE readonly='1'" [||] (fun r ->
+      if Win.exists r.(0) then Win.set_readonly r.(0) true);
   Db.iter db "SELECT path FROM undo_dirs ORDER BY length(path) DESC,path DESC" [||] (fun r ->
       if Win.exists r.(0) then begin
         if not (Win.remove_dir r.(0)) then fail ("created directory is not empty: " ^ r.(0));

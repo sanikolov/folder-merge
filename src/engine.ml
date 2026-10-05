@@ -18,7 +18,7 @@ let check_sources db journal c ~run_id =
      directories and the T root are preserved. rmdir itself confirms emptiness. *)
   if c.empty_dirs = Prune then
     Db.iter db "SELECT rel FROM prune_dirs" [||] (fun r ->
-        try Win.probe (Path.join c.trim r.(0)) Win.Remove_directory
+        try ignore (Win.probe_prune (Path.join c.trim r.(0)))
         with e ->
           incr errors;
           Journal.error journal "PRUNE_PREFLIGHT" r.(0) e);
@@ -87,11 +87,24 @@ let execute db journal c run_id =
       with e ->
         Journal.error journal "TRANSFER" source e;
         raise e);
+  let prune_skipped = ref 0 and prune_readonly = ref 0 in
   if c.empty_dirs = Prune then
     Db.iter db "SELECT rel FROM prune_dirs ORDER BY length(rel) DESC,rel DESC" [||] (fun r ->
         let path = Path.join c.trim r.(0) in
-        Journal.emit journal "PRUNE_INTENT" [ ("path", Journal.s path) ];
-        if Win.remove_dir path then Journal.emit journal "PRUNE" [ ("path", Journal.s path) ])
+        Journal.emit journal "PRUNE_INTENT"
+          [ ("path", Journal.s path); ("readonly", `Bool (Win.readonly path)) ];
+        match Win.prune_dir path with
+        | Win.Pruned -> Journal.emit journal "PRUNE" [ ("path", Journal.s path) ]
+        | Win.Pruned_readonly ->
+            incr prune_readonly;
+            Journal.emit journal "PRUNE"
+              [ ("path", Journal.s path); ("readonly_cleared", `Bool true) ]
+        | Win.Not_empty -> ()
+        | Win.Access_denied ->
+            incr prune_skipped;
+            Journal.emit journal "PRUNE_SKIPPED"
+              [ ("path", Journal.s path); ("reason", Journal.s "access denied") ]);
+  (!prune_skipped, !prune_readonly)
 
 let run c argv =
   let c =
@@ -162,12 +175,21 @@ let run c argv =
             Planner.summary db journal;
             check_sources db journal c ~run_id:id;
             Space.preflight db journal c;
-            if c.operation <> Plan then execute db journal c id;
+            let prune_skipped, prune_readonly =
+              if c.operation <> Plan then execute db journal c id else (0, 0)
+            in
             Journal.emit journal "END"
               [
                 ("outcome", Journal.s (if c.operation = Plan then "PLANNED" else "SUCCESS"));
                 ("scan_hash_errors", `Int 0);
+                ("prune_skipped", `Int prune_skipped);
+                ("prune_readonly", `Int prune_readonly);
               ];
+            if prune_readonly > 0 then
+              Printf.printf "Pruned %d read-only source directories.\n%!" prune_readonly;
+            if prune_skipped > 0 then
+              Printf.printf "Skipped %d inaccessible source directories during pruning; see journal.\n%!"
+                prune_skipped;
             success := true
           with e ->
             Journal.error journal "RUN" "" e;

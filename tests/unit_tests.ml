@@ -278,12 +278,37 @@ let test_db () =
           check "rollback keeps records"
             ((Option.get (Db.one db "SELECT count(*) FROM files" [||])).(0) = "5000")))
 
+let test_prune_readonly () =
+  let dir = Filename.temp_file "folder-merge-prune-test-" "" in
+  let file = Filename.concat dir "keep" in
+  Sys.remove dir;
+  Win.mkdir dir;
+  Fun.protect
+    ~finally:(fun () ->
+      if Win.exists dir then begin
+        Win.set_readonly dir false;
+        if Win.exists file then Win.unlink file;
+        ignore (Win.remove_dir dir)
+      end)
+    (fun () ->
+      Win.set_readonly dir true;
+      ignore (Win.probe_prune dir);
+      check "readonly directory removed after retry" (Win.prune_dir dir = Win.Pruned_readonly);
+      check "readonly directory absent" (not (Win.exists dir));
+      Win.mkdir dir;
+      let channel = open_out_bin file in
+      close_out channel;
+      Win.set_readonly dir true;
+      check "nonempty readonly directory retained" (Win.prune_dir dir = Win.Not_empty);
+      check "readonly flag restored after failed retry" (Win.readonly dir))
+
 let () =
   test_collision ();
   test_cli ();
   test_stack ();
   test_pool ();
   test_native ();
+  test_prune_readonly ();
   test_db ();
   test_transfer true None_ Verify;
   test_transfer false None_ Verify;

@@ -54,6 +54,19 @@ external readonly : string -> bool = "fm_readonly"
 external set_readonly : string -> bool -> unit = "fm_set_readonly"
 external mkdir : string -> unit = "fm_mkdir"
 external remove_dir : string -> bool = "fm_remove_dir"
+type prune_result = Pruned | Pruned_readonly | Not_empty | Access_denied
+
+external native_prune_dir : string -> int = "fm_prune_dir"
+external probe_prune : string -> bool = "fm_probe_prune"
+
+let prune_dir path =
+  match native_prune_dir path with
+  | 0 -> Pruned
+  | 1 -> Not_empty
+  | 2 -> Access_denied
+  | 3 -> Pruned_readonly
+  | _ -> failwith "Invalid native prune result"
+
 external rename : string -> string -> bool = "fm_rename"
 external copy : string -> string -> unit = "fm_copy"
 external unlink : string -> unit = "fm_unlink"

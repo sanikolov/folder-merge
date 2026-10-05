@@ -204,6 +204,44 @@ CAMLprim value fm_remove_dir(value path) {
   if(!ok && e!=ERROR_DIR_NOT_EMPTY) win_error("Prune directory",e);
   CAMLreturn(Val_bool(ok));
 }
+/* Optional source pruning: 0 removed, 1 nonempty, 2 access denied,
+   3 removed after clearing its read-only flag. Restore the flag on failure. */
+CAMLprim value fm_prune_dir(value path) {
+  CAMLparam1(path); wchar_t *p=wide(path);
+  BOOL ok=RemoveDirectoryW(p); DWORD e=ok?0:GetLastError();
+  BOOL cleared_readonly=FALSE;
+  if(!ok && e==ERROR_ACCESS_DENIED) {
+    DWORD attributes=GetFileAttributesW(p);
+    if(attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_READONLY)) {
+      if(SetFileAttributesW(p,without_readonly(attributes))) {
+        cleared_readonly=TRUE;
+        ok=RemoveDirectoryW(p); e=ok?0:GetLastError();
+        if(!ok && !SetFileAttributesW(p,attributes)) {
+          DWORD restore_error=GetLastError(); caml_stat_free(p);
+          win_error("Restore read-only directory attribute",restore_error);
+        }
+      } else e=GetLastError();
+    }
+  }
+  caml_stat_free(p);
+  if(ok && cleared_readonly) CAMLreturn(Val_int(3));
+  if(ok) CAMLreturn(Val_int(0));
+  if(e==ERROR_DIR_NOT_EMPTY) CAMLreturn(Val_int(1));
+  if(e==ERROR_ACCESS_DENIED) CAMLreturn(Val_int(2));
+  win_error("Prune directory",e);
+  CAMLreturn(Val_int(0));
+}
+CAMLprim value fm_probe_prune(value path) {
+  CAMLparam1(path); wchar_t *p=wide(path);
+  DWORD a=GetFileAttributesW(p), e=GetLastError();
+  if(a==INVALID_FILE_ATTRIBUTES) { caml_stat_free(p); win_error("Prune preflight attributes",e); }
+  HANDLE h=open_path(p,DELETE|FILE_LIST_DIRECTORY); e=GetLastError(); caml_stat_free(p);
+  if(h==INVALID_HANDLE_VALUE) {
+    if(e==ERROR_ACCESS_DENIED) CAMLreturn(Val_false);
+    win_error("Prune preflight access/sharing",e);
+  }
+  CloseHandle(h); CAMLreturn(Val_true);
+}
 CAMLprim value fm_rename(value source,value dest) {
   CAMLparam2(source,dest); wchar_t *s=wide(source),*d=wide(dest);
   /* Neither REPLACE_EXISTING nor COPY_ALLOWED: cannot overwrite or silently copy. */

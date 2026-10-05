@@ -93,7 +93,8 @@ This reverses the operations recorded in that log, in reverse execution order:
 - Quarantined files return from their actual Q locations to their original T paths.
 - Merged files return from K to their original T paths. A file moved to
   `K\report (2).pdf` returns to `T\report.pdf`, not to the collision-generated name.
-- Pruned T directories are recreated. Directories created by the original run
+- Pruned T directories are recreated, including their original ReadOnly flag
+  when that flag was recorded in the transaction log. Directories created by the original run
   beneath K/Q, including a previously absent Q root and its new ancestors, are
   removed only when empty. Pre-existing K/Q files and directories remain intact.
 
@@ -270,7 +271,11 @@ Root junctions are resolved before these rules are applied.
 `keep` leaves T directories in place. `prune` considers only ancestors of
 successfully moved files, deepest first; pre-existing empty directories and the
 T root remain. `RemoveDirectoryW` checks actual emptiness; a remaining link or
-file prevents removal. Q directories are never pruned. Empty T directories are
+file prevents removal. If a ReadOnly directory denies removal, its ReadOnly flag
+is cleared and removal is retried; the flag is restored if the retry fails.
+Directories that still deny removal are logged as `PRUNE_SKIPPED`, and pruning
+continues. The final `END` record counts skipped and retried ReadOnly directories.
+Q directories are never pruned. Empty T directories are
 not materialized in K merely because a merge was requested.
 
 Unicode and extended-length Windows paths are used throughout. UNC roots can be

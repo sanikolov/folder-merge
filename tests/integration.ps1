@@ -30,6 +30,7 @@ function Invoke-Reconcile($case, [string]$operation = 'merge', [string]$empty = 
     $journalLine = $output | Where-Object { "$_" -like 'Journal: *' } | Select-Object -First 1
     if ($journalLine) {
         $journalPath = "$journalLine".Substring(9)
+        $script:lastJournalPath = $journalPath
         $events = @(Get-Content -LiteralPath $journalPath | ForEach-Object { $_ | ConvertFrom-Json })
         $peaks = @($events | Where-Object event -eq 'IO_PEAK')
         foreach ($peak in $peaks) { Assert ($peak.hash_jobs -le $parallelism) 'global I/O bound' }
@@ -125,6 +126,40 @@ foreach ($policy in 'keep','prune') {
     Assert ([IO.Directory]::Exists("$($c.T)\already-empty")) 'pre-existing empty directory retained'
     Assert ([IO.Directory]::Exists($c.T)) 'T root retained'
 }
+
+$c=New-Case 'readonly-directory-prune'
+Write-File "$($c.T)\zreadonly\one" 'one'
+Write-File "$($c.T)\aclean\two" 'two'
+[IO.File]::SetAttributes("$($c.T)\zreadonly",[IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReadOnly)
+$events=Invoke-Reconcile $c 'merge' 'prune'
+Assert (-not [IO.Directory]::Exists("$($c.T)\zreadonly")) 'readonly empty directory retried and pruned'
+Assert (-not [IO.Directory]::Exists("$($c.T)\aclean")) 'later empty directory also pruned'
+Assert (@($events | Where-Object { $_.event -eq 'PRUNE' -and $_.readonly_cleared }).Count -eq 1) 'readonly retry journaled'
+Assert (($events | Where-Object event -eq 'END').prune_readonly -eq 1) 'readonly retry counted'
+$output=(& $exe -recover $script:lastJournalPath 2>&1 | Out-String)
+Assert ($LASTEXITCODE -eq 0) "readonly prune recovery: $output"
+Assert ([IO.File]::Exists("$($c.T)\zreadonly\one")) 'readonly prune recovery restores source'
+Assert (([IO.File]::GetAttributes("$($c.T)\zreadonly") -band [IO.FileAttributes]::ReadOnly) -ne 0) 'recovery restores directory readonly flag'
+
+$c=New-Case 'denied-directory-prune'
+Write-File "$($c.T)\zprotected\one" 'one'
+Write-File "$($c.T)\aclean\two" 'two'
+$protected="$($c.T)\zprotected"
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+$savedAcl=Get-Acl -LiteralPath $protected
+$deniedAcl=Get-Acl -LiteralPath $protected
+$deniedAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $identity,[Security.AccessControl.FileSystemRights]::Delete,
+    [Security.AccessControl.InheritanceFlags]::None,
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Deny))
+Set-Acl -LiteralPath $protected -AclObject $deniedAcl
+try { $events=Invoke-Reconcile $c 'merge' 'prune' }
+finally { if ([IO.Directory]::Exists($protected)) { Set-Acl -LiteralPath $protected -AclObject $savedAcl } }
+Assert ([IO.Directory]::Exists($protected)) 'access-denied directory retained'
+Assert (-not [IO.Directory]::Exists("$($c.T)\aclean")) 'pruning continued after access denial'
+Assert (@($events | Where-Object { $_.event -eq 'PRUNE_SKIPPED' -and $_.path -like '*zprotected' }).Count -eq 1) 'access-denied prune journaled'
+Assert (($events | Where-Object event -eq 'END').prune_skipped -eq 1) 'access-denied prune counted'
 
 $c=New-Case 'deep'; $path=$c.T
 for ($i=0; $i -lt $Depth; $i++) { $path=Join-Path $path 'd' }
