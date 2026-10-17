@@ -22,8 +22,19 @@ while ($ancestor.Length -ge $boundary.Length) {
 $pending = [Collections.Generic.Stack[string]]::new()
 $pending.Push($target)
 $removed = 0
+$cleared = 0
 while ($pending.Count -gt 0) {
     $directory = $pending.Pop()
+    # Recovery tests intentionally restore directory readonly flags. Clear them
+    # only after assertions, so Git can remove the retained test fixtures.
+    $directoryAttributes = [IO.File]::GetAttributes($directory)
+    if ($directoryAttributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Cleanup directory became a reparse point: $directory"
+    }
+    if ($directoryAttributes -band [IO.FileAttributes]::ReadOnly) {
+        [IO.File]::SetAttributes($directory, $directoryAttributes -band (-bnot [IO.FileAttributes]::ReadOnly))
+        $cleared++
+    }
     foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
         $attributes = [IO.File]::GetAttributes($entry)
         if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -39,3 +50,4 @@ while ($pending.Count -gt 0) {
     }
 }
 Write-Host "Removed $removed test link(s) without following their targets."
+Write-Host "Cleared readonly on $cleared test directories."

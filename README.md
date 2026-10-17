@@ -25,8 +25,8 @@ The executable uses Windows' `bcrypt.dll` and `winsqlite3.dll`; a separate SQLit
 installation is unnecessary. SQLite is loaded explicitly from System32.
 
 Tests create their own fixtures under ignored `test-results\run-*` directories.
-Junctions are removed in a `finally` block, including when a test fails. After a
-forced termination, remove any leftover links safely with
+Junctions are removed and test directory read-only flags are cleared in a `finally`
+block, including when a test fails. After a forced termination, prepare leftover fixtures with
 `.\tests\clean-test-links.ps1` before using Git cleanup. For genuinely deep test
 directories, use `git -c core.longpaths=true clean -fdx -- test-results`.
 The build only searches `src` and `tests`, so fixture junction cycles cannot be
